@@ -2,11 +2,18 @@ const mongoose = require('mongoose');
 
 const connectDB = async () => {
   try {
+    // Check if we are already connected (useful for Vercel serverless)
+    if (mongoose.connections[0].readyState) {
+      console.log('MongoDB already connected');
+      return;
+    }
     const conn = await mongoose.connect(process.env.MONGO_URI);
     console.log(`MongoDB connected: ${conn.connection.host}`);
   } catch (error) {
     console.error(`MongoDB connection error: ${error.message}`);
-    process.exit(1);
+    if (process.env.NODE_ENV !== 'production') {
+      process.exit(1);
+    }
   }
 };
 
