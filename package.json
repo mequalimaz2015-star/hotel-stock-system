@@ -1,0 +1,13 @@
+{
+  "name": "hotel-stock-system",
+  "version": "1.0.0",
+  "description": "Hotel Stock Management System",
+  "main": "server/server.js",
+  "scripts": {
+    "build": "cd client && npm install && npm run build && cd ../server && npm install",
+    "start": "cd server && npm start"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
