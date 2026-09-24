@@ -1,0 +1,459 @@
+import React, { useEffect, useState, useCallback } from 'react';
+import {
+  Plus, Trash2, Search, ArrowDownCircle, ArrowUpCircle,
+  ShoppingBag, CreditCard, Flame, TrendingDown, TrendingUp, Leaf, X, Eye,
+} from 'lucide-react';
+import api from '../api/axios';
+import Button from '../components/ui/Button';
+import Modal from '../components/ui/Modal';
+import WorkflowBadge from '../components/ui/WorkflowBadge';
+import ApproveModal, { TrailTimeline } from '../components/ui/ApproveModal';
+import { useAuth } from '../context/AuthContext';
+
+// ── Voucher config ────────────────────────────────────────────────────
+const VOUCHERS = [
+  { key: 'cash_grv',       label: 'Cash GRV',        fullLabel: 'Cash Goods Receiving Voucher',   icon: ShoppingBag,  badgeCls: 'bg-emerald-100 text-emerald-700', activeCls: 'bg-emerald-600', direction: 'in',  needsSupplier: true,  needsCost: true,  description: 'Goods received and paid in cash' },
+  { key: 'credit_grv',     label: 'Credit GRV',      fullLabel: 'Credit Goods Receiving Voucher', icon: CreditCard,   badgeCls: 'bg-blue-100 text-blue-700',       activeCls: 'bg-blue-600',    direction: 'in',  needsSupplier: true,  needsCost: true,  description: 'Goods received on credit / invoice' },
+  { key: 'fresh_bazaar',   label: 'Fresh Bazaar',    fullLabel: 'Fresh Bazaar Receiving Voucher', icon: Leaf,         badgeCls: 'bg-lime-100 text-lime-700',       activeCls: 'bg-lime-600',    direction: 'in',  needsSupplier: false, needsCost: true,  description: 'Fresh market / direct purchase receiving' },
+  { key: 'pos_adjustment', label: '+ve Adjustment',  fullLabel: 'Positive Stock Adjustment',      icon: TrendingUp,   badgeCls: 'bg-violet-100 text-violet-700',   activeCls: 'bg-violet-600',  direction: 'in',  needsSupplier: false, needsCost: false, description: 'Correct stock upward after physical count' },
+  { key: 'disposal',       label: 'Disposal',        fullLabel: 'Goods Disposal Voucher',         icon: Flame,        badgeCls: 'bg-orange-100 text-orange-700',   activeCls: 'bg-orange-600',  direction: 'out', needsSupplier: false, needsCost: false, description: 'Write off damaged / expired goods' },
+  { key: 'neg_adjustment', label: '−ve Adjustment',  fullLabel: 'Negative Stock Adjustment',      icon: TrendingDown, badgeCls: 'bg-red-100 text-red-700',         activeCls: 'bg-red-600',     direction: 'out', needsSupplier: false, needsCost: false, description: 'Correct stock downward after physical count' },
+];
+const voucherByKey = Object.fromEntries(VOUCHERS.map(v => [v.key, v]));
+const emptyItem = () => ({ material: '', quantity: '', unitCost: '' });
+const emptyForm = key => ({ voucherType: key, voucherNo: '', supplier: '', reason: '', reference: '', notes: '', date: new Date().toISOString().slice(0, 16), items: [emptyItem()] });
+
+// ── Component ─────────────────────────────────────────────────────────
+export default function StockTransactions({ defaultVoucher } = {}) {
+  const { hasRole } = useAuth();
+  const canEdit   = hasRole('admin', 'manager', 'storekeeper');
+  const canDelete = hasRole('admin', 'manager');
+
+  // filterType comes from sidebar navigation (defaultVoucher) or stays null (All)
+  const filterType = defaultVoucher ?? null;
+
+  const [transactions, setTransactions] = useState([]);
+  const [materials,    setMaterials]    = useState([]);
+  const [suppliers,    setSuppliers]    = useState([]);
+  const [search,       setSearch]       = useState('');
+  const [modalOpen,    setModalOpen]    = useState(false);
+  const [activeV,      setActiveV]      = useState(null);
+  const [form,         setForm]         = useState(null);
+  const [error,        setError]        = useState('');
+  const [submitting,   setSubmitting]   = useState(false);
+
+  // Workflow approval state
+  const [approveOpen,    setApproveOpen]    = useState(false);
+  const [approveAction,  setApproveAction]  = useState(null);
+  const [approveTxn,     setApproveTxn]     = useState(null);
+  const [approveLoading, setApproveLoading] = useState(false);
+  const [approveError,   setApproveError]   = useState(null);
+  // Detail / trail modal
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailTxn,  setDetailTxn]  = useState(null);
+
+  // Auto-open form when arriving via a specific voucher sidebar link
+  useEffect(() => {
+    if (defaultVoucher && voucherByKey[defaultVoucher]) {
+      openForm(defaultVoucher);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultVoucher]);
+
+  const load = useCallback(() => {
+    const params = filterType ? { voucherType: filterType } : {};
+    api.get('/transactions', { params }).then(r => setTransactions(r.data));
+  }, [filterType]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    api.get('/materials').then(r => setMaterials(r.data));
+    api.get('/suppliers').then(r => setSuppliers(r.data));
+  }, []);
+
+  const displayed = transactions.filter(t => {
+    if (!search) return true;
+    const mat = t.material?.name ?? t.items?.[0]?.material?.name ?? '';
+    return (mat + (t.voucherNo ?? '') + (t.supplier?.name ?? '')).toLowerCase().includes(search.toLowerCase());
+  });
+
+  const openForm = key => { setActiveV(voucherByKey[key]); setForm(emptyForm(key)); setError(''); setModalOpen(true); };
+  const addItem    = ()          => setForm(f => ({ ...f, items: [...f.items, emptyItem()] }));
+  const removeItem = i           => setForm(f => ({ ...f, items: f.items.filter((_, idx) => idx !== i) }));
+  const updateItem = (i, fld, v) => setForm(f => {
+    const items = [...f.items];
+    items[i] = { ...items[i], [fld]: v };
+    if (fld === 'material') { const m = materials.find(m => m._id === v); items[i].unitCost = m?.unitCost ?? ''; }
+    return { ...f, items };
+  });
+
+  const handleSubmit = async e => {
+    e.preventDefault(); setError(''); setSubmitting(true);
+    try {
+      await api.post('/transactions', {
+        voucherType: form.voucherType,
+        voucherNo:   form.voucherNo  || undefined,
+        supplier:    form.supplier   || undefined,
+        reason: form.reason, reference: form.reference, notes: form.notes, date: form.date,
+        items: form.items.filter(it => it.material && it.quantity).map(it => ({
+          material: it.material, quantity: Number(it.quantity), unitCost: Number(it.unitCost) || 0,
+        })),
+      });
+      setModalOpen(false); load();
+    } catch (err) { setError(err.response?.data?.message || 'Could not save voucher.');
+    } finally { setSubmitting(false); }
+  };
+
+  const handleDelete = async id => {
+    if (!confirm('Delete this transaction and reverse its stock effect?')) return;
+    await api.delete(`/transactions/${id}`); load();
+  };
+
+  // ── Workflow helpers ──
+  const NEXT_ACTIONS = {
+    pending:  [{ action: 'check',   label: 'Check',   roles: ['admin','manager'] },
+               { action: 'void',    label: 'Void',    roles: ['admin'], danger: true }],
+    checked:  [{ action: 'approve', label: 'Approve', roles: ['admin'] },
+               { action: 'void',    label: 'Void',    roles: ['admin'], danger: true }],
+    approved: [{ action: 'post',    label: 'Post',    roles: ['admin','manager'] },
+               { action: 'void',    label: 'Void',    roles: ['admin'], danger: true }],
+    posted:   [],
+    voided:   [],
+  };
+
+  const ACTION_COLORS = {
+    check:   'bg-blue-600 hover:bg-blue-700',
+    approve: 'bg-violet-600 hover:bg-violet-700',
+    post:    'bg-emerald-600 hover:bg-emerald-700',
+    void:    'bg-red-50 hover:bg-red-100 !text-red-600',
+  };
+
+  const actionsFor = (txn) => {
+    const possible = NEXT_ACTIONS[txn.status ?? 'pending'] ?? [];
+    return possible.filter(a => a.roles.includes(user?.role));
+  };
+
+  const openApprove = (txn, action) => {
+    setApproveTxn(txn); setApproveAction(action);
+    setApproveError(null); setApproveOpen(true);
+  };
+
+  const handleAdvance = async (password, note) => {
+    setApproveLoading(true); setApproveError(null);
+    try {
+      await api.post(`/transactions/${approveTxn._id}/advance`, { action: approveAction, password, note });
+      setApproveOpen(false); load();
+    } catch (err) {
+      setApproveError(err.response?.data?.message || 'Action failed');
+    } finally { setApproveLoading(false); }
+  };
+
+  const formTotal = form?.items.reduce((s, it) => s + (Number(it.quantity)||0) * (Number(it.unitCost)||0), 0) ?? 0;
+
+  // Page heading
+  const headingV = filterType ? voucherByKey[filterType] : null;
+  const HeadingIcon = headingV?.icon;
+
+  return (
+    <div className="space-y-4">
+
+      {/* ── Page header ── */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {HeadingIcon && (
+            <span className={`inline-flex items-center justify-center rounded-lg p-2 ${headingV.badgeCls}`}>
+              <HeadingIcon size={18} />
+            </span>
+          )}
+          <div>
+            <h1 className="text-lg font-bold text-ink-900">
+              {headingV ? headingV.fullLabel : 'All Stock Movements'}
+            </h1>
+            {headingV && (
+              <p className="text-xs text-ink-400">{headingV.description}</p>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {/* Search */}
+          <div className="relative">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-300" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search…"
+              className="rounded-lg border border-ink-200 py-2 pl-8 pr-3 text-sm outline-none focus:border-blue-500 w-44"
+            />
+          </div>
+
+          {/* New voucher button — only shown on specific voucher pages */}
+          {canEdit && headingV && (
+            <button
+              onClick={() => openForm(headingV.key)}
+              className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white ${headingV.activeCls}`}
+            >
+              <Plus size={15} /> New {headingV.label}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* ── Transactions table ── */}
+      <div className="overflow-x-auto rounded-xl border border-ink-100 bg-white shadow-soft">
+        <table className="min-w-full divide-y divide-ink-100 text-sm">
+          <thead className="bg-ink-50/60">
+            <tr>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Date</th>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Voucher No</th>
+              {!filterType && <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Type</th>}
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Direction</th>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Material(s)</th>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Supplier</th>
+              <th className="px-4 py-3 text-right font-semibold text-ink-500 whitespace-nowrap">Total (ETB)</th>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">Status</th>
+              <th className="px-4 py-3 text-left font-semibold text-ink-500 whitespace-nowrap">By</th>
+              {canDelete && <th className="px-4 py-3" />}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-ink-50">
+            {displayed.length === 0 && (
+              <tr><td colSpan={canDelete ? 9 : 8} className="px-4 py-12 text-center text-ink-400">No transactions found.</td></tr>
+            )}
+            {displayed.map(t => {
+              const v = voucherByKey[t.voucherType];
+              const Icon = v?.icon ?? ArrowDownCircle;
+              const isIn = t.type === 'in';
+              const matSummary = t.items?.length > 0
+                ? t.items.map(i => `${i.material?.name ?? '—'} ×${i.quantity}`).join(', ')
+                : `${t.material?.name ?? '—'}${t.quantity ? ' ×' + t.quantity : ''}`;
+              const acts = actionsFor(t);
+              return (
+                <tr key={t._id} className="hover:bg-ink-50/40">
+                  <td className="px-4 py-3 whitespace-nowrap text-xs text-ink-500">{new Date(t.date).toLocaleString()}</td>
+                  <td className="px-4 py-3 whitespace-nowrap font-mono text-xs text-ink-400">{t.voucherNo || '—'}</td>
+                  {!filterType && (
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      {v ? (
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold ${v.badgeCls}`}>
+                          <Icon size={11} /> {v.label}
+                        </span>
+                      ) : <span className="text-xs text-ink-400">—</span>}
+                    </td>
+                  )}
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <span className={`inline-flex items-center gap-1 text-xs font-semibold ${isIn ? 'text-emerald-700' : 'text-red-700'}`}>
+                      {isIn ? <ArrowDownCircle size={13}/> : <ArrowUpCircle size={13}/>}
+                      {isIn ? 'IN' : 'OUT'}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-ink-700 max-w-[180px] truncate" title={matSummary}>{matSummary}</td>
+                  <td className="px-4 py-3 whitespace-nowrap text-xs text-ink-500">{t.supplier?.name || '—'}</td>
+                  <td className="px-4 py-3 whitespace-nowrap text-right tabular font-medium text-ink-800">
+                    {t.totalAmount ? `ETB ${t.totalAmount.toFixed(2)}` : '—'}
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap">
+                    <WorkflowBadge status={t.status ?? 'pending'} size="sm" />
+                  </td>
+                  <td className="px-4 py-3 whitespace-nowrap text-xs text-ink-400">{t.performedBy?.name || '—'}</td>
+                  {canDelete && (
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <div className="flex items-center gap-1">
+                        {/* Detail / trail */}
+                        <button
+                          onClick={() => { setDetailTxn(t); setDetailOpen(true); }}
+                          className="rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-ink-600"
+                          title="View trail"
+                        >
+                          <Eye size={13} />
+                        </button>
+                        {/* Workflow action buttons */}
+                        {acts.map(a => (
+                          <button key={a.action}
+                            onClick={() => openApprove(t, a.action)}
+                            className={`rounded-lg px-2 py-1 text-xs font-semibold text-white ${ACTION_COLORS[a.action]}`}>
+                            {a.label}
+                          </button>
+                        ))}
+                        {/* Delete (only pending/voided) */}
+                        {['pending','voided'].includes(t.status ?? 'pending') && (
+                          <button onClick={() => handleDelete(t._id)}
+                            className="rounded-md p-1.5 text-ink-300 hover:bg-red-50 hover:text-red-600">
+                            <Trash2 size={13} />
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="border-t border-ink-100 px-4 py-2 text-xs text-ink-400">
+          {displayed.length} record{displayed.length !== 1 ? 's' : ''}
+        </div>
+      </div>
+
+      {/* ── Voucher Form Modal ── */}
+      {activeV && form && (
+        <Modal open={modalOpen} onClose={() => setModalOpen(false)} title={activeV.fullLabel} width="max-w-2xl">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${activeV.direction === 'in' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+              {activeV.direction === 'in' ? <ArrowDownCircle size={16}/> : <ArrowUpCircle size={16}/>}
+              {activeV.description} — stock will be <strong>{activeV.direction === 'in' ? 'increased' : 'decreased'}</strong>
+            </div>
+            {error && <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-600"><X size={14}/>{error}</div>}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-ink-500">Voucher No <span className="font-normal text-ink-400">(auto if blank)</span></label>
+                <input value={form.voucherNo} onChange={e => setForm(f=>({...f,voucherNo:e.target.value}))} placeholder="Auto-generated"
+                  className="w-full rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500"/>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-ink-500">Date &amp; Time</label>
+                <input type="datetime-local" value={form.date} onChange={e => setForm(f=>({...f,date:e.target.value}))}
+                  className="w-full rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500"/>
+              </div>
+              {activeV.needsSupplier && (
+                <div className="col-span-2">
+                  <label className="mb-1 block text-xs font-semibold text-ink-500">Supplier *</label>
+                  <select required value={form.supplier} onChange={e => setForm(f=>({...f,supplier:e.target.value}))}
+                    className="w-full rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500">
+                    <option value="">Select supplier…</option>
+                    {suppliers.map(s => <option key={s._id} value={s._id}>{s.name}</option>)}
+                  </select>
+                </div>
+              )}
+              {!activeV.needsSupplier && (
+                <div className="col-span-2">
+                  <label className="mb-1 block text-xs font-semibold text-ink-500">{activeV.key === 'disposal' ? 'Disposal reason' : 'Adjustment reason'}</label>
+                  <input value={form.reason} onChange={e => setForm(f=>({...f,reason:e.target.value}))}
+                    placeholder={activeV.key === 'disposal' ? 'e.g. Expired, damaged…' : 'e.g. Physical count variance…'}
+                    className="w-full rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500"/>
+                </div>
+              )}
+              <div className="col-span-2">
+                <label className="mb-1 block text-xs font-semibold text-ink-500">Reference <span className="font-normal text-ink-400">(optional)</span></label>
+                <input value={form.reference} onChange={e => setForm(f=>({...f,reference:e.target.value}))} placeholder="e.g. INV-2024-001"
+                  className="w-full rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500"/>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-sm font-semibold text-ink-700">Items *</p>
+                <button type="button" onClick={addItem}
+                  className="flex items-center gap-1 rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-100">
+                  <Plus size={13}/> Add row
+                </button>
+              </div>
+              <div className={`grid gap-2 mb-1 px-1 text-xs font-semibold text-ink-400 ${activeV.needsCost ? 'grid-cols-[1fr_80px_110px_26px]' : 'grid-cols-[1fr_80px_26px]'}`}>
+                <span>Material</span><span>Quantity</span>{activeV.needsCost && <span>Unit Cost (ETB)</span>}<span/>
+              </div>
+              <div className="space-y-2">
+                {form.items.map((item, idx) => (
+                  <div key={idx} className={`grid gap-2 items-center ${activeV.needsCost ? 'grid-cols-[1fr_80px_110px_26px]' : 'grid-cols-[1fr_80px_26px]'}`}>
+                    <select required value={item.material} onChange={e => updateItem(idx,'material',e.target.value)}
+                      className="rounded-lg border border-ink-200 px-2 py-2 text-sm outline-none focus:border-blue-500">
+                      <option value="">Select material…</option>
+                      {materials.map(m => <option key={m._id} value={m._id}>{m.name} — {m.currentStock} {m.unit} in stock</option>)}
+                    </select>
+                    <input type="number" step="0.001" min="0.001" required placeholder="Qty" value={item.quantity}
+                      onChange={e => updateItem(idx,'quantity',e.target.value)}
+                      className="rounded-lg border border-ink-200 px-2 py-2 text-sm outline-none focus:border-blue-500"/>
+                    {activeV.needsCost && (
+                      <input type="number" step="0.01" min="0" placeholder="Unit cost" value={item.unitCost}
+                        onChange={e => updateItem(idx,'unitCost',e.target.value)}
+                        className="rounded-lg border border-ink-200 px-2 py-2 text-sm outline-none focus:border-blue-500"/>
+                    )}
+                    <button type="button" onClick={() => removeItem(idx)} disabled={form.items.length===1}
+                      className="rounded-md p-1 text-ink-300 hover:bg-red-50 hover:text-red-500 disabled:opacity-30">
+                      <X size={14}/>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {activeV.needsCost && formTotal > 0 && (
+                <div className="mt-3 flex justify-between rounded-lg bg-ink-50 px-3 py-2 text-sm">
+                  <span className="text-ink-500">Total amount</span>
+                  <span className="font-bold text-ink-900">ETB {formTotal.toFixed(2)}</span>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-ink-500">Notes <span className="font-normal text-ink-400">(optional)</span></label>
+              <textarea rows={2} value={form.notes} onChange={e => setForm(f=>({...f,notes:e.target.value}))}
+                className="w-full resize-none rounded-lg border border-ink-200 px-3 py-2 text-sm outline-none focus:border-blue-500"/>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <Button type="button" variant="ghost" onClick={() => setModalOpen(false)}>Cancel</Button>
+              <button type="submit" disabled={submitting}
+                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold text-white disabled:opacity-50 ${activeV.activeCls}`}>
+                {submitting ? 'Saving…' : `Post ${activeV.label}`}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {/* ── Approve Modal ── */}
+      <ApproveModal
+        open={approveOpen}
+        onClose={() => setApproveOpen(false)}
+        onConfirm={handleAdvance}
+        action={approveAction}
+        entityLabel={approveTxn?.voucherNo || `Voucher #${approveTxn?._id?.slice(-6)}`}
+        loading={approveLoading}
+        error={approveError}
+        currentStatus={approveTxn?.status ?? 'pending'}
+        mode="transaction"
+        trail={approveTxn?.trail ?? []}
+      />
+
+      {/* ── Detail / Trail Modal ── */}
+      <Modal
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+        title={`${voucherByKey[detailTxn?.voucherType]?.fullLabel ?? 'Voucher'} — ${detailTxn?.voucherNo || ''}`}
+        width="max-w-md"
+      >
+        {detailTxn && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div><p className="text-xs text-ink-400">Status</p><WorkflowBadge status={detailTxn.status ?? 'pending'} /></div>
+              <div><p className="text-xs text-ink-400">Date</p><p className="font-medium">{new Date(detailTxn.date).toLocaleString()}</p></div>
+              <div><p className="text-xs text-ink-400">Recorded by</p><p className="font-medium">{detailTxn.performedBy?.name ?? '—'}</p></div>
+              <div><p className="text-xs text-ink-400">Total</p><p className="font-semibold">ETB {(detailTxn.totalAmount||0).toFixed(2)}</p></div>
+            </div>
+            <div className="rounded-lg bg-ink-50 p-3 text-xs space-y-1">
+              {[
+                { label: 'Checked by',  who: detailTxn.checkedBy,  at: detailTxn.checkedAt },
+                { label: 'Approved by', who: detailTxn.approvedBy, at: detailTxn.approvedAt },
+                { label: 'Posted by',   who: detailTxn.postedBy,   at: detailTxn.postedAt },
+              ].filter(e => e.who).map((e, i) => (
+                <div key={i} className="flex justify-between">
+                  <span className="text-ink-500">{e.label}</span>
+                  <span className="font-medium">{e.who?.name ?? '—'} {e.at ? `· ${new Date(e.at).toLocaleDateString()}` : ''}</span>
+                </div>
+              ))}
+            </div>
+            <TrailTimeline trail={detailTxn.trail ?? []} />
+            {actionsFor(detailTxn).length > 0 && (
+              <div className="flex flex-wrap gap-2 pt-1 border-t border-ink-100">
+                {actionsFor(detailTxn).map(a => (
+                  <button key={a.action}
+                    onClick={() => { setDetailOpen(false); openApprove(detailTxn, a.action); }}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold text-white ${ACTION_COLORS[a.action]}`}>
+                    {a.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}

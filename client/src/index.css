@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-50 text-ink-900 antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #d7ddea; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #aeb9d2; }
+
+*:focus-visible {
+  outline: 2px solid #c89b3c;
+  outline-offset: 2px;
+}

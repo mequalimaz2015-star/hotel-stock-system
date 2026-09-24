@@ -1,0 +1,129 @@
+const asyncHandler = require('express-async-handler');
+const XLSX = require('xlsx');
+const RawMaterial = require('../models/RawMaterial');
+
+const getMaterials = asyncHandler(async (req, res) => {
+  const { search, status } = req.query;
+  const filter = {};
+  if (search) filter.name = { $regex: search, $options: 'i' };
+
+  let materials = await RawMaterial.find(filter).sort({ name: 1 });
+
+  if (status) {
+    materials = materials.filter((m) => m.status === status);
+  }
+
+  res.json(materials);
+});
+
+const getMaterialById = asyncHandler(async (req, res) => {
+  const material = await RawMaterial.findById(req.params.id);
+  if (!material) {
+    res.status(404);
+    throw new Error('Raw material not found');
+  }
+  res.json(material);
+});
+
+const createMaterial = asyncHandler(async (req, res) => {
+  const material = await RawMaterial.create(req.body);
+  res.status(201).json(material);
+});
+
+const updateMaterial = asyncHandler(async (req, res) => {
+  const material = await RawMaterial.findByIdAndUpdate(req.params.id, req.body, {
+    new: true,
+    runValidators: true,
+  });
+  if (!material) {
+    res.status(404);
+    throw new Error('Raw material not found');
+  }
+  res.json(material);
+});
+
+const deleteMaterial = asyncHandler(async (req, res) => {
+  const material = await RawMaterial.findById(req.params.id);
+  if (!material) {
+    res.status(404);
+    throw new Error('Raw material not found');
+  }
+  await material.deleteOne();
+  res.json({ message: 'Raw material removed' });
+});
+
+// GET /api/materials/export/excel
+const exportMaterialsExcel = asyncHandler(async (req, res) => {
+  const materials = await RawMaterial.find({}).sort({ name: 1 });
+
+  const rows = materials.map((m) => ({
+    'Name': m.name,
+    'Category': m.category,
+    'Unit': m.unit,
+    'Current Stock': m.currentStock,
+    'Reorder Level': m.reorderLevel,
+    'Unit Cost': m.unitCost,
+    'Store Location': m.storeLocation,
+    'Status': m.status,
+  }));
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  // Set column widths
+  ws['!cols'] = [20, 15, 8, 14, 14, 10, 16, 12].map((w) => ({ wch: w }));
+  XLSX.utils.book_append_sheet(wb, ws, 'Raw Materials');
+  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+  res.setHeader('Content-Disposition', 'attachment; filename="raw_materials.xlsx"');
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(buf);
+});
+
+// POST /api/materials/import/excel
+const importMaterialsExcel = asyncHandler(async (req, res) => {
+  if (!req.file) { res.status(400); throw new Error('No file uploaded'); }
+
+  const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws);
+
+  let created = 0;
+  let updated = 0;
+
+  for (const row of rows) {
+    const name = String(row['Name'] || '').trim();
+    if (!name) continue;
+
+    const data = {
+      name,
+      category: String(row['Category'] || 'General').trim(),
+      unit: String(row['Unit'] || 'pcs').trim(),
+      currentStock: Number(row['Current Stock']) || 0,
+      reorderLevel: Number(row['Reorder Level']) || 10,
+      unitCost: Number(row['Unit Cost']) || 0,
+      storeLocation: String(row['Store Location'] || 'Main Store').trim(),
+    };
+
+    const existing = await RawMaterial.findOne({ name: { $regex: `^${name}$`, $options: 'i' } });
+    if (existing) {
+      Object.assign(existing, data);
+      await existing.save();
+      updated++;
+    } else {
+      await RawMaterial.create(data);
+      created++;
+    }
+  }
+
+  res.json({ message: `Imported: ${created} created, ${updated} updated` });
+});
+
+module.exports = {
+  getMaterials,
+  getMaterialById,
+  createMaterial,
+  updateMaterial,
+  deleteMaterial,
+  exportMaterialsExcel,
+  importMaterialsExcel,
+};
