@@ -13,6 +13,16 @@ app.use(cors({ origin: process.env.CLIENT_URL || '*' }));
 app.use(express.json());
 if (process.env.NODE_ENV !== 'production') app.use(morgan('dev'));
 
+// Ensure DB is connected for serverless requests
+app.use(async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ status: 'ok', service: 'hotel-stock-server' }));
 
 app.use('/api/auth', require('./routes/authRoutes'));
