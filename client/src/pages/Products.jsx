@@ -161,7 +161,7 @@ const Products = () => {
     // Get the auth token from localStorage
     const stored = localStorage.getItem('hotelStockAuth');
     const token = stored ? JSON.parse(stored).token : '';
-    const baseURL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+    const baseURL = import.meta.env.VITE_API_URL || '/api';
 
     try {
       const response = await fetch(`${baseURL}/products/import/excel`, {
